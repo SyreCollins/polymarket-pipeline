@@ -15,6 +15,7 @@ from rich.table import Table
 from rich.panel import Panel
 
 import config
+import llm
 import logger
 from scraper import scrape_all
 from markets import fetch_active_markets, filter_by_categories
@@ -100,6 +101,10 @@ class PipelineV2:
 
             # Classify against each matched market
             for market in matched:
+                cooldown = llm.provider_cooldown_remaining()
+                if cooldown > 0:
+                    log.info(f"[pipeline] Skipping classification during AI cooldown ({cooldown:.0f}s remaining)")
+                    break
                 try:
                     classification = await classify_async(
                         event.headline, market, event.source

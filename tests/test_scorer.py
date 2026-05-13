@@ -63,3 +63,19 @@ def test_score_market_returns_baseline_without_news():
 
     assert result["confidence"] == 0.5
     assert result["relevant_headlines"] == []
+
+
+def test_news_rows_use_toon_rows():
+    news = [
+        NewsItem(
+            headline="OpenAI ships model",
+            source="rss",
+            url="",
+            published_at=datetime.now(timezone.utc),
+        )
+    ]
+
+    result = scorer._news_rows(news)
+
+    assert result.startswith("news[1]{id,source,age_h,headline}:")
+    assert "OpenAI ships model" in result

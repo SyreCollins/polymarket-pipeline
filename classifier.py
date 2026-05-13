@@ -1,6 +1,5 @@
 """
-Claude classification engine — replaces probability estimation with direction classification.
-Asks "does this news confirm or deny the market question?" instead of "what's the probability?"
+AI classification engine for prediction-market news.
 """
 from __future__ import annotations
 
@@ -9,35 +8,21 @@ import time
 import logging
 from dataclasses import dataclass
 
-import config
 import llm
+import toon
 from markets import Market
 
 log = logging.getLogger(__name__)
 
-CLASSIFICATION_PROMPT = """You are a news classifier for prediction markets.
+CLASSIFICATION_PROMPT = """Classify prediction-market news.
+Task: Does news make market more likely YES, more likely NO, or not relevant? Rate materiality 0..1.
 
-## Market Question
-{question}
+Input (TOON):
+{input_toon}
 
-## Current Market Price
-YES: {yes_price:.2f} (implied probability: {yes_price:.0%})
-
-## Breaking News
-{headline}
-Source: {source}
-
-## Task
-Does this news make the market question MORE likely to resolve YES, MORE likely to resolve NO, or is it NOT RELEVANT?
-
-Also rate the MATERIALITY — how much should this move the price? 0.0 means no impact, 1.0 means this is definitive evidence.
-
-Respond with ONLY valid JSON:
-{{
-  "direction": "bullish" | "bearish" | "neutral",
-  "materiality": <float 0.0 to 1.0>,
-  "reasoning": "<1 sentence>"
-}}"""
+Return ONLY JSON:
+{{"direction":"bullish","materiality":0.0,"reasoning":"one sentence"}}
+Allowed direction values: bullish, bearish, neutral."""
 
 
 @dataclass
@@ -52,13 +37,7 @@ class Classification:
 def classify(headline: str, market: Market, source: str = "unknown") -> Classification:
     """Classify a news headline against a market question. Synchronous."""
     start = time.time()
-
-    prompt = CLASSIFICATION_PROMPT.format(
-        question=market.question,
-        yes_price=market.yes_price,
-        headline=headline,
-        source=source,
-    )
+    prompt = CLASSIFICATION_PROMPT.format(input_toon=_classification_toon(headline, market, source))
 
     try:
         response = llm.generate_text(
@@ -95,6 +74,15 @@ def classify(headline: str, market: Market, source: str = "unknown") -> Classifi
             latency_ms=latency,
             model=llm.selected_model("classification"),
         )
+
+
+def _classification_toon(headline: str, market: Market, source: str) -> str:
+    return toon.mapping({
+        "market": market.question,
+        "yes_price": f"{market.yes_price:.2f}",
+        "news": headline,
+        "source": source,
+    })
 
 
 def _load_json_object(text: str) -> dict:

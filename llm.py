@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import re
 import threading
 import time
 
@@ -10,6 +11,7 @@ import config
 log = logging.getLogger(__name__)
 _request_lock = threading.Lock()
 _last_request_at = 0.0
+_gemini_cooldown_until = 0.0
 
 
 @dataclass
@@ -137,6 +139,7 @@ def _generate_gemini(
         raise RuntimeError("google-genai package is not installed") from e
 
     model = _gemini_model_for(purpose)
+    _raise_if_gemini_cooling_down()
     client = genai.Client(api_key=config.GEMINI_API_KEY)
     gemini_config = {
         "max_output_tokens": max_tokens,
@@ -146,23 +149,31 @@ def _generate_gemini(
         gemini_config["response_mime_type"] = "application/json"
 
     _wait_for_rate_limit()
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=gemini_config,
-    )
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=gemini_config,
+        )
+    except Exception as e:
+        _maybe_start_gemini_cooldown(e)
+        raise
     text = _gemini_response_text(response)
     if not text and response_json:
         log.debug("[llm] Gemini returned empty JSON-mode response; retrying without JSON mode")
         _wait_for_rate_limit()
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config={
-                "max_output_tokens": max_tokens,
-                "temperature": temperature,
-            },
-        )
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config={
+                    "max_output_tokens": max_tokens,
+                    "temperature": temperature,
+                },
+            )
+        except Exception as e:
+            _maybe_start_gemini_cooldown(e)
+            raise
         text = _gemini_response_text(response)
 
     if not text:
@@ -219,3 +230,44 @@ def _wait_for_rate_limit():
             log.info(f"[llm] Waiting {wait_seconds:.1f}s for AI rate limit")
             time.sleep(wait_seconds)
         _last_request_at = time.monotonic()
+
+
+def provider_cooldown_remaining() -> float:
+    if selected_provider() != "gemini":
+        return 0.0
+    return max(0.0, _gemini_cooldown_until - time.monotonic())
+
+
+def _raise_if_gemini_cooling_down():
+    remaining = provider_cooldown_remaining()
+    if remaining > 0:
+        raise RuntimeError(f"Gemini quota cooldown active; retry in {remaining:.0f}s")
+
+
+def _maybe_start_gemini_cooldown(error: Exception):
+    message = str(error)
+    if "429" not in message and "RESOURCE_EXHAUSTED" not in message and "quota" not in message.lower():
+        return
+
+    retry_seconds = _extract_retry_seconds(message) or config.AI_QUOTA_COOLDOWN_SECONDS
+    _start_gemini_cooldown(retry_seconds)
+
+
+def _extract_retry_seconds(message: str) -> float | None:
+    patterns = [
+        r"retryDelay['\"]?:\s*['\"]?(\d+(?:\.\d+)?)s",
+        r"retry in (\d+(?:\.\d+)?)s",
+        r"Please retry in (\d+(?:\.\d+)?)s",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, message, flags=re.IGNORECASE)
+        if match:
+            return float(match.group(1))
+    return None
+
+
+def _start_gemini_cooldown(seconds: float):
+    global _gemini_cooldown_until
+    seconds = max(1.0, seconds)
+    _gemini_cooldown_until = max(_gemini_cooldown_until, time.monotonic() + seconds)
+    log.warning(f"[llm] Gemini quota cooldown active for {seconds:.0f}s")

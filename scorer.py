@@ -4,54 +4,34 @@ import json
 
 import config
 import llm
+import toon
 from scraper import NewsItem
 from markets import Market
 
 
-SCORING_PROMPT = """You are a prediction market analyst. Your job is to estimate the probability that a specific market question will resolve YES, based on recent news headlines.
+SCORING_PROMPT = """Estimate probability market resolves YES from recent news. Do not anchor to market price.
+Use base rates, recency, and source credibility. Be calibrated: 0.50=no info, 0.90+=near certainty.
 
-## Market Question
-{question}
+Input (TOON):
+{input_toon}
 
-## Current Market Price
-YES token price: {yes_price:.2f} (market's implied probability: {yes_price:.0%})
-
-## Recent News Headlines (last {lookback}h)
-{headlines}
-
-## Instructions
-1. Analyze each headline for relevance to the market question.
-2. Consider base rates, recency of news, and source credibility.
-3. Form an independent probability estimate — do NOT anchor to the current market price.
-4. Be calibrated: 0.50 means you have no information, 0.90+ means near certainty.
-
-Respond with ONLY valid JSON in this exact format:
-{{
-  "confidence": <float between 0.0 and 1.0>,
-  "reasoning": "<2-3 sentence explanation>",
-  "relevant_headlines": [<indices of relevant headlines, 0-indexed>]
-}}"""
+Return ONLY JSON:
+{{"confidence":0.0,"reasoning":"2-3 sentences","relevant_headlines":[0]}}"""
 
 
 def score_market(market: Market, news: list[NewsItem]) -> dict:
     """Score a market question against recent news using the configured AI provider."""
-    headlines_text = "\n".join(
-        f"[{i}] [{item.source}] ({item.age_hours():.1f}h ago) {item.headline}"
-        for i, item in enumerate(news)
-    )
+    headlines_text = _news_rows(news)
 
-    if not headlines_text.strip():
+    if not news:
         return {
             "confidence": 0.5,
-            "reasoning": "No relevant news found — returning baseline.",
+            "reasoning": "No relevant news found - returning baseline.",
             "relevant_headlines": [],
         }
 
     prompt = SCORING_PROMPT.format(
-        question=market.question,
-        yes_price=market.yes_price,
-        lookback=config.NEWS_LOOKBACK_HOURS,
-        headlines=headlines_text,
+        input_toon=_scoring_toon(market, headlines_text),
     )
 
     try:
@@ -84,7 +64,7 @@ def filter_news_for_market(market: Market, news: list[NewsItem]) -> list[NewsIte
     """Quick keyword filter to reduce noise before scoring."""
     keywords = _extract_keywords(market.question)
     if not keywords:
-        return news[:30]  # fallback: send top 30 by recency
+        return news[:30]
 
     relevant = []
     for item in news:
@@ -104,8 +84,31 @@ def _extract_keywords(question: str) -> list[str]:
         "does", "do", "than", "more", "less", "over", "under",
     }
     words = question.lower().split()
-    keywords = [w.strip("?.,!") for w in words if w.strip("?.,!") not in stopwords and len(w) > 2]
-    return keywords
+    return [w.strip("?.,!") for w in words if w.strip("?.,!") not in stopwords and len(w) > 2]
+
+
+def _news_rows(news: list[NewsItem]) -> str:
+    items = [
+        {
+            "id": i,
+            "source": item.source,
+            "age_h": f"{item.age_hours():.1f}",
+            "headline": item.headline,
+        }
+        for i, item in enumerate(news)
+    ]
+    return toon.rows("news", ["id", "source", "age_h", "headline"], items)
+
+
+def _scoring_toon(market: Market, headlines_text: str) -> str:
+    return "\n".join([
+        toon.mapping({
+            "market": market.question,
+            "yes_price": f"{market.yes_price:.2f}",
+            "lookback_h": config.NEWS_LOOKBACK_HOURS,
+        }),
+        headlines_text,
+    ])
 
 
 def _load_json_object(text: str) -> dict:
